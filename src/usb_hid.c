@@ -47,7 +47,12 @@ static const struct hid_ops ops = {
 };
 
 static void send_report(const uint8_t *data, uint8_t len) {
-    k_sem_take(&hid_sem, K_MSEC(30));
+    // Never stall the key-event path waiting on the host: if the previous
+    // report is still unread after 2ms, drop this one instead.
+    if (k_sem_take(&hid_sem, K_MSEC(2)) != 0) {
+        LOG_DBG("USB - Raw HID busy, dropping report");
+        return;
+    }
 
     LOG_INF("USB - Sending Raw HID report of length %i", len);
     /*
