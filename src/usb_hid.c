@@ -20,8 +20,8 @@ static K_SEM_DEFINE(hid_sem, 1, 1);
  * - a USB reset, disconnect or (re)configuration ends whatever was in flight, so it gives the
  *   semaphore back (usb_state_listener);
  * - failing that, a report that finds the previous transfer pending for STUCK_MS tries the
- *   write itself. The driver refuses it while the endpoint is really busy, so a slow host
- *   still loses only this report, and the static buffer is never rewritten under a DMA.
+ *   write itself, from the other buffer. The driver refuses it while the endpoint is really
+ *   busy, so a slow host still loses only this report.
  * Both act on an event (a USB status change, a report to send); nothing runs on a timer.
  */
 #define STUCK_MS 100
@@ -92,10 +92,14 @@ static void send_report(const uint8_t *data, uint8_t len) {
      * buffer, and the transfer outlives the call. A stack buffer sends its
      * first bytes correctly and then whatever the stack holds by then -- which
      * looks like a report with a good header and RAM pointers in the tail.
-     * hid_sem is held until in_ready_cb, so only one transfer reads it at once.
+     * Two of them, used in turn: a report sent past a stuck transfer (above)
+     * may find that transfer still reading its buffer, so it fills the other
+     * one. The driver takes one transfer at a time, so two are enough.
      */
-    static uint8_t report[CONFIG_RAW_HID_REPORT_SIZE];
-    memset(report, 0, sizeof(report));
+    static uint8_t reports[2][CONFIG_RAW_HID_REPORT_SIZE];
+    static int last; // the buffer of the last transfer the driver accepted
+    uint8_t *report = reports[!last];
+    memset(report, 0, CONFIG_RAW_HID_REPORT_SIZE);
     memcpy(report, data, len);
     LOG_HEXDUMP_DBG(report, CONFIG_RAW_HID_REPORT_SIZE, "USB - Sending Raw HID report");
 
@@ -104,6 +108,8 @@ static void send_report(const uint8_t *data, uint8_t len) {
     if (err) {
         LOG_ERR("Failed to send report: %i", err);
         k_sem_give(&hid_sem);
+    } else {
+        last = !last;
     }
 }
 
