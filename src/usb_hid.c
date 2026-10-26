@@ -2,6 +2,8 @@
 #include <raw_hid/events.h>
 
 #include <zmk/usb.h>
+#include <zmk/event_manager.h>
+#include <zmk/events/usb_conn_state_changed.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
@@ -9,6 +11,21 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 static const struct device *raw_hid_dev;
 
 static K_SEM_DEFINE(hid_sem, 1, 1);
+
+/*
+ * hid_sem is taken for each IN transfer and given back by in_ready_cb when the host has read
+ * it. A transfer the host never completes (the bus reset or suspended under it: a PC restart,
+ * sleep, a replug of the PC side) never calls in_ready_cb, and every later report was dropped
+ * for good: the PC heard nothing more on USB until the keyboard restarted. Two ways out:
+ * - a USB reset, disconnect or (re)configuration ends whatever was in flight, so it gives the
+ *   semaphore back (usb_state_listener);
+ * - failing that, a report that finds the previous transfer pending for STUCK_MS tries the
+ *   write itself, from the other buffer. The driver refuses it while the endpoint is really
+ *   busy, so a slow host still loses only this report.
+ * Both act on an event (a USB status change, a report to send); nothing runs on a timer.
+ */
+#define STUCK_MS 100
+static int64_t in_flight_since;
 
 static void in_ready_cb(const struct device *dev) { k_sem_give(&hid_sem); }
 
@@ -47,11 +64,26 @@ static const struct hid_ops ops = {
 };
 
 static void send_report(const uint8_t *data, uint8_t len) {
+#if IS_ENABLED(CONFIG_ZMK_USB)
+    switch (zmk_usb_get_status()) {
+    case USB_DC_ERROR:
+    case USB_DC_RESET:
+    case USB_DC_DISCONNECTED:
+    case USB_DC_UNKNOWN:
+        return; // nobody to read it: don't queue a transfer that can't complete
+    default:
+        break;
+    }
+#endif
     // Never stall the key-event path waiting on the host: if the previous
     // report is still unread after 2ms, drop this one instead.
     if (k_sem_take(&hid_sem, K_MSEC(2)) != 0) {
-        LOG_DBG("USB - Raw HID busy, dropping report");
-        return;
+        if (k_uptime_get() - in_flight_since < STUCK_MS) {
+            LOG_DBG("USB - Raw HID busy, dropping report");
+            return;
+        }
+        // The previous transfer looks lost: write anyway, and keep hid_sem for this one.
+        LOG_WRN("USB - Raw HID transfer pending for %d ms, sending anyway", STUCK_MS);
     }
 
     LOG_INF("USB - Sending Raw HID report of length %i", len);
@@ -60,17 +92,24 @@ static void send_report(const uint8_t *data, uint8_t len) {
      * buffer, and the transfer outlives the call. A stack buffer sends its
      * first bytes correctly and then whatever the stack holds by then -- which
      * looks like a report with a good header and RAM pointers in the tail.
-     * hid_sem is held until in_ready_cb, so only one transfer reads it at once.
+     * Two of them, used in turn: a report sent past a stuck transfer (above)
+     * may find that transfer still reading its buffer, so it fills the other
+     * one. The driver takes one transfer at a time, so two are enough.
      */
-    static uint8_t report[CONFIG_RAW_HID_REPORT_SIZE];
-    memset(report, 0, sizeof(report));
+    static uint8_t reports[2][CONFIG_RAW_HID_REPORT_SIZE];
+    static int last; // the buffer of the last transfer the driver accepted
+    uint8_t *report = reports[!last];
+    memset(report, 0, CONFIG_RAW_HID_REPORT_SIZE);
     memcpy(report, data, len);
     LOG_HEXDUMP_DBG(report, CONFIG_RAW_HID_REPORT_SIZE, "USB - Sending Raw HID report");
 
+    in_flight_since = k_uptime_get();
     int err = hid_int_ep_write(raw_hid_dev, report, CONFIG_RAW_HID_REPORT_SIZE, NULL);
     if (err) {
         LOG_ERR("Failed to send report: %i", err);
         k_sem_give(&hid_sem);
+    } else {
+        last = !last;
     }
 }
 
@@ -85,6 +124,25 @@ static int raw_hid_sent_event_listener(const zmk_event_t *eh) {
 
 ZMK_LISTENER(usb_process_raw_hid_sent_event, raw_hid_sent_event_listener);
 ZMK_SUBSCRIPTION(usb_process_raw_hid_sent_event, raw_hid_sent_event);
+
+#if IS_ENABLED(CONFIG_ZMK_USB)
+static int usb_state_listener(const zmk_event_t *eh) {
+    switch (zmk_usb_get_status()) {
+    case USB_DC_RESET:
+    case USB_DC_DISCONNECTED:
+    case USB_DC_CONFIGURED:
+        // Nothing survives these in flight: the next report may go (see hid_sem above).
+        k_sem_give(&hid_sem);
+        break;
+    default:
+        break;
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(usb_raw_hid_state, usb_state_listener);
+ZMK_SUBSCRIPTION(usb_raw_hid_state, zmk_usb_conn_state_changed);
+#endif
 
 static int raw_hid_init(void) {
     raw_hid_dev = device_get_binding(CONFIG_RAW_HID_DEVICE);
