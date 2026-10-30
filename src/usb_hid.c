@@ -5,29 +5,132 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/usb_conn_state_changed.h>
 
+#include <string.h>
+
+#include <zephyr/kernel.h>
+#include <zephyr/spinlock.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 static const struct device *raw_hid_dev;
 
-static K_SEM_DEFINE(hid_sem, 1, 1);
-
 /*
- * hid_sem is taken for each IN transfer and given back by in_ready_cb when the host has read
- * it. A transfer the host never completes (the bus reset or suspended under it: a PC restart,
- * sleep, a replug of the PC side) never calls in_ready_cb, and every later report was dropped
- * for good: the PC heard nothing more on USB until the keyboard restarted. Two ways out:
- * - a USB reset, disconnect or (re)configuration ends whatever was in flight, so it gives the
- *   semaphore back (usb_state_listener);
- * - failing that, a report that finds the previous transfer pending for STUCK_MS tries the
- *   write itself, from the other buffer. The driver refuses it while the endpoint is really
- *   busy, so a slow host still loses only this report.
- * Both act on an event (a USB status change, a report to send); nothing runs on a timer.
+ * One IN transfer at a time; the reports that come meanwhile wait in a small ring and go out
+ * one by one after the endpoint's done callback (BanditF/foxglove#680: a key press sends three
+ * reports back to back, and dropping the one that found the endpoint busy sometimes lost the
+ * layer report). When the ring is full the oldest waiting report is dropped: the newest wins.
+ *
+ * A transfer the host never completes (the bus reset or suspended under it: a PC restart,
+ * sleep, a replug of the PC side) never calls in_ready_cb, and every later report used to be
+ * lost for good. Two ways out:
+ * - a USB reset, disconnect or (re)configuration ends whatever was in flight
+ *   (usb_state_listener); reset and disconnect also drop the waiting reports, no host reads them;
+ * - failing that, a report that finds the transfer pending for STUCK_MS takes it as lost and
+ *   goes from the other buffer.
+ *
+ * Start/stop, no timers: a report starts a transfer when none is in flight, else it waits in the
+ * ring; each done callback sends the next waiting one (on the system work queue) and the chain
+ * ends when the ring is empty; a USB status change ends a transfer in flight.
  */
 #define STUCK_MS 100
-static int64_t in_flight_since;
+#define QUEUE_LEN CONFIG_RAW_HID_QUEUE_SIZE
 
-static void in_ready_cb(const struct device *dev) { k_sem_give(&hid_sem); }
+struct queued {
+    uint8_t len;
+    uint8_t data[CONFIG_RAW_HID_REPORT_SIZE];
+};
+static struct queued queue[QUEUE_LEN];
+static uint8_t q_head, q_count; // the oldest waiting report, and how many wait
+static bool in_flight;          // a transfer the driver accepted hasn't completed
+static int64_t in_flight_since;
+static struct k_spinlock lock;
+
+/*
+ * Static, not on the stack: the nRF USB device DMAs straight out of this buffer, and the transfer
+ * outlives the call. A stack buffer sends its first bytes correctly and then whatever the stack
+ * holds by then -- which looks like a report with a good header and RAM pointers in the tail.
+ * Two of them, used in turn: a report sent past a stuck transfer (above) may find that transfer
+ * still reading its buffer, so it fills the other one. The driver takes one transfer at a time,
+ * so two are enough.
+ */
+static uint8_t reports[2][CONFIG_RAW_HID_REPORT_SIZE];
+static int last; // the buffer of the last transfer the driver accepted
+
+static bool usb_ready(void) {
+#if IS_ENABLED(CONFIG_ZMK_USB)
+    switch (zmk_usb_get_status()) {
+    case USB_DC_ERROR:
+    case USB_DC_RESET:
+    case USB_DC_DISCONNECTED:
+    case USB_DC_UNKNOWN:
+        return false; // nobody to read it: don't queue a transfer that can't complete
+    default:
+        break;
+    }
+#endif
+    return true;
+}
+
+// Starts one transfer; the caller has set in_flight. A refusal clears it and loses this report
+// (the next report or done callback goes on with the ring).
+static void write_report(const uint8_t *data, uint8_t len) {
+    uint8_t *report = reports[!last];
+    memset(report, 0, CONFIG_RAW_HID_REPORT_SIZE);
+    memcpy(report, data, MIN(len, CONFIG_RAW_HID_REPORT_SIZE));
+    LOG_HEXDUMP_DBG(report, CONFIG_RAW_HID_REPORT_SIZE, "USB - Sending Raw HID report");
+
+    int err = hid_int_ep_write(raw_hid_dev, report, CONFIG_RAW_HID_REPORT_SIZE, NULL);
+    k_spinlock_key_t key = k_spin_lock(&lock);
+    if (err) {
+        in_flight = false;
+    } else {
+        last = !last;
+    }
+    k_spin_unlock(&lock, key);
+    if (err) {
+        LOG_ERR("Failed to send report: %i", err);
+    }
+}
+
+// Takes the oldest waiting report, if any, and marks a transfer in flight for it. Under lock.
+static bool pop_locked(struct queued *out) {
+    if (q_count == 0) {
+        return false;
+    }
+    *out = queue[q_head];
+    q_head = (q_head + 1) % QUEUE_LEN;
+    q_count--;
+    in_flight = true;
+    in_flight_since = k_uptime_get();
+    return true;
+}
+
+// Sends the oldest waiting report when nothing is in flight: after the done callback and after a
+// USB (re)configuration. System work queue.
+static void drain_cb(struct k_work *work) {
+    if (!usb_ready()) {
+        return;
+    }
+    struct queued next;
+    k_spinlock_key_t key = k_spin_lock(&lock);
+    bool go = !in_flight && pop_locked(&next);
+    k_spin_unlock(&lock, key);
+    if (go) {
+        write_report(next.data, next.len);
+    }
+}
+static K_WORK_DEFINE(drain_work, drain_cb);
+
+static void in_ready_cb(const struct device *dev) {
+    k_spinlock_key_t key = k_spin_lock(&lock);
+    in_flight = false;
+    bool more = q_count > 0;
+    k_spin_unlock(&lock, key);
+    if (more) {
+        k_work_submit(&drain_work); // not from inside the USB driver's callback
+    }
+}
 
 #define HID_GET_REPORT_TYPE_MASK 0xff00
 #define HID_GET_REPORT_ID_MASK 0x00ff
@@ -64,52 +167,31 @@ static const struct hid_ops ops = {
 };
 
 static void send_report(const uint8_t *data, uint8_t len) {
-#if IS_ENABLED(CONFIG_ZMK_USB)
-    switch (zmk_usb_get_status()) {
-    case USB_DC_ERROR:
-    case USB_DC_RESET:
-    case USB_DC_DISCONNECTED:
-    case USB_DC_UNKNOWN:
-        return; // nobody to read it: don't queue a transfer that can't complete
-    default:
-        break;
+    if (!usb_ready()) {
+        return;
     }
-#endif
-    // Never stall the key-event path waiting on the host: if the previous
-    // report is still unread after 2ms, drop this one instead.
-    if (k_sem_take(&hid_sem, K_MSEC(2)) != 0) {
-        if (k_uptime_get() - in_flight_since < STUCK_MS) {
-            LOG_DBG("USB - Raw HID busy, dropping report");
-            return;
-        }
-        // The previous transfer looks lost: write anyway, and keep hid_sem for this one.
-        LOG_WRN("USB - Raw HID transfer pending for %d ms, sending anyway", STUCK_MS);
-    }
-
     LOG_INF("USB - Sending Raw HID report of length %i", len);
-    /*
-     * Static, not on the stack: the nRF USB device DMAs straight out of this
-     * buffer, and the transfer outlives the call. A stack buffer sends its
-     * first bytes correctly and then whatever the stack holds by then -- which
-     * looks like a report with a good header and RAM pointers in the tail.
-     * Two of them, used in turn: a report sent past a stuck transfer (above)
-     * may find that transfer still reading its buffer, so it fills the other
-     * one. The driver takes one transfer at a time, so two are enough.
-     */
-    static uint8_t reports[2][CONFIG_RAW_HID_REPORT_SIZE];
-    static int last; // the buffer of the last transfer the driver accepted
-    uint8_t *report = reports[!last];
-    memset(report, 0, CONFIG_RAW_HID_REPORT_SIZE);
-    memcpy(report, data, len);
-    LOG_HEXDUMP_DBG(report, CONFIG_RAW_HID_REPORT_SIZE, "USB - Sending Raw HID report");
-
-    in_flight_since = k_uptime_get();
-    int err = hid_int_ep_write(raw_hid_dev, report, CONFIG_RAW_HID_REPORT_SIZE, NULL);
-    if (err) {
-        LOG_ERR("Failed to send report: %i", err);
-        k_sem_give(&hid_sem);
-    } else {
-        last = !last;
+    struct queued next;
+    k_spinlock_key_t key = k_spin_lock(&lock);
+    if (in_flight && k_uptime_get() - in_flight_since >= STUCK_MS) {
+        // The transfer looks lost (the host never read it): the next one goes past it.
+        LOG_WRN("USB - Raw HID transfer pending for %d ms, sending anyway", STUCK_MS);
+        in_flight = false;
+    }
+    if (q_count == QUEUE_LEN) {
+        LOG_WRN("USB - Raw HID queue full, dropping the oldest report");
+        q_head = (q_head + 1) % QUEUE_LEN;
+        q_count--;
+    }
+    struct queued *slot = &queue[(q_head + q_count) % QUEUE_LEN];
+    slot->len = MIN(len, CONFIG_RAW_HID_REPORT_SIZE);
+    memcpy(slot->data, data, slot->len);
+    q_count++;
+    // Oldest first: this report goes now only when nothing waits ahead of it.
+    bool go = !in_flight && pop_locked(&next);
+    k_spin_unlock(&lock, key);
+    if (go) {
+        write_report(next.data, next.len);
     }
 }
 
@@ -129,11 +211,22 @@ ZMK_SUBSCRIPTION(usb_process_raw_hid_sent_event, raw_hid_sent_event);
 static int usb_state_listener(const zmk_event_t *eh) {
     switch (zmk_usb_get_status()) {
     case USB_DC_RESET:
-    case USB_DC_DISCONNECTED:
-    case USB_DC_CONFIGURED:
-        // Nothing survives these in flight: the next report may go (see hid_sem above).
-        k_sem_give(&hid_sem);
+    case USB_DC_DISCONNECTED: {
+        // Nothing in flight survives these, and no host will read what waits.
+        k_spinlock_key_t key = k_spin_lock(&lock);
+        in_flight = false;
+        q_count = 0;
+        k_spin_unlock(&lock, key);
         break;
+    }
+    case USB_DC_CONFIGURED: {
+        // A (re)configuration ends a transfer in flight too; anything waiting goes now.
+        k_spinlock_key_t key = k_spin_lock(&lock);
+        in_flight = false;
+        k_spin_unlock(&lock, key);
+        k_work_submit(&drain_work);
+        break;
+    }
     default:
         break;
     }
