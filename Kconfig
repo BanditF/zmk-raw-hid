@@ -15,6 +15,14 @@ config RAW_HID_REPORT_SIZE
     int "Raw HID Report Size"
     default 32
 
+config RAW_HID_QUEUE_SIZE
+    int "Raw HID reports waiting while a transfer is in flight"
+    default 8
+    range 1 64
+    help
+      Reports sent while the USB endpoint is busy wait here and go out in order after the
+      endpoint's done callback; when it is full the oldest waiting report is dropped.
+
 config RAW_HID_DEVICE
     string "Raw HID Device"
     default HID_1
