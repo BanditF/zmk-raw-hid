@@ -1,6 +1,8 @@
 #include <raw_hid/raw_hid.h>
 #include <raw_hid/events.h>
 
+#include "stats_internal.h"
+
 #include <zmk/ble.h>
 
 #include <zephyr/bluetooth/gatt.h>
@@ -141,6 +143,7 @@ static void send_report(const uint8_t *data, uint8_t len) {
     };
 
     int err = bt_gatt_notify_cb(conn, &notify_params);
+    raw_hid_stat_inc(err ? RAW_HID_STAT_FAILED : RAW_HID_STAT_SENT);
     if (err == -EPERM) {
         bt_conn_set_security(conn, BT_SECURITY_L2);
     } else if (err) {

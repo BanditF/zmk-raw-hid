@@ -72,6 +72,17 @@ ZMK_SUBSCRIPTION(process_raw_hid_event, raw_hid_received_event);
 | `CONFIG_RAW_HID_USAGE`       | HID Usage                         | 0x61    |
 | `CONFIG_RAW_HID_REPORT_SIZE` | HID Report size (number of bytes) | 32      |
 | `CONFIG_RAW_HID_DEVICE`      | New HID device name               | HID_1   |
+| `CONFIG_RAW_HID_QUEUE_SIZE`  | Reports waiting while a USB transfer is in flight | 8 |
+
+## Counters
+
+`#include <raw_hid/stats.h>` and call `raw_hid_stats_get()` for what the senders did since boot
+(saturating counts, any thread): `sent` (transfers or notifications a transport accepted; a report
+sent over both USB and BLE counts twice), `queued` (USB reports that waited for a transfer in
+flight), `dropped` (waiting USB reports lost: the ring was full, or a USB reset or disconnect
+emptied it), `failed` (a transport refused the report) and `stuck` (USB transfers taken as lost
+after 100 ms). Code that also builds against older copies of this module can test for the header
+with `__has_include(<raw_hid/stats.h>)`.
 
 ## Thanks
 
