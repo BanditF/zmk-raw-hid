@@ -1,6 +1,8 @@
 #include <raw_hid/raw_hid.h>
 #include <raw_hid/events.h>
 
+#include "stats_internal.h"
+
 #include <zmk/usb.h>
 #include <zmk/event_manager.h>
 #include <zmk/events/usb_conn_state_changed.h>
@@ -88,6 +90,7 @@ static void write_report(const uint8_t *data, uint8_t len) {
         last = !last;
     }
     k_spin_unlock(&lock, key);
+    raw_hid_stat_inc(err ? RAW_HID_STAT_FAILED : RAW_HID_STAT_SENT);
     if (err) {
         LOG_ERR("Failed to send report: %i", err);
     }
@@ -173,16 +176,20 @@ static void send_report(const uint8_t *data, uint8_t len) {
     LOG_INF("USB - Sending Raw HID report of length %i", len);
     struct queued next;
     k_spinlock_key_t key = k_spin_lock(&lock);
+    bool stuck = false, full = false;
     if (in_flight && k_uptime_get() - in_flight_since >= STUCK_MS) {
         // The transfer looks lost (the host never read it): the next one goes past it.
         LOG_WRN("USB - Raw HID transfer pending for %d ms, sending anyway", STUCK_MS);
         in_flight = false;
+        stuck = true;
     }
     if (q_count == QUEUE_LEN) {
         LOG_WRN("USB - Raw HID queue full, dropping the oldest report");
         q_head = (q_head + 1) % QUEUE_LEN;
         q_count--;
+        full = true;
     }
+    bool waits = in_flight || q_count > 0; // this report doesn't go at once
     struct queued *slot = &queue[(q_head + q_count) % QUEUE_LEN];
     slot->len = MIN(len, CONFIG_RAW_HID_REPORT_SIZE);
     memcpy(slot->data, data, slot->len);
@@ -190,6 +197,15 @@ static void send_report(const uint8_t *data, uint8_t len) {
     // Oldest first: this report goes now only when nothing waits ahead of it.
     bool go = !in_flight && pop_locked(&next);
     k_spin_unlock(&lock, key);
+    if (stuck) {
+        raw_hid_stat_inc(RAW_HID_STAT_STUCK);
+    }
+    if (full) {
+        raw_hid_stat_inc(RAW_HID_STAT_DROPPED);
+    }
+    if (waits) {
+        raw_hid_stat_inc(RAW_HID_STAT_QUEUED);
+    }
     if (go) {
         write_report(next.data, next.len);
     }
@@ -215,8 +231,10 @@ static int usb_state_listener(const zmk_event_t *eh) {
         // Nothing in flight survives these, and no host will read what waits.
         k_spinlock_key_t key = k_spin_lock(&lock);
         in_flight = false;
+        uint8_t lost = q_count;
         q_count = 0;
         k_spin_unlock(&lock, key);
+        raw_hid_stat_add(RAW_HID_STAT_DROPPED, lost);
         break;
     }
     case USB_DC_CONFIGURED: {
