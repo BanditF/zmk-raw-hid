@@ -127,7 +127,8 @@ BT_GATT_SERVICE_DEFINE(
 static void send_report(const uint8_t *data, uint8_t len) {
     struct bt_conn *conn = zmk_ble_active_profile_conn();
     if (conn == NULL) {
-        LOG_ERR("Not connected to active profile");
+        raw_hid_stat_inc(RAW_HID_STAT_BLE_SKIPPED); // no PC there: not a fault
+        LOG_DBG("Not connected to active profile");
         return;
     }
 
@@ -143,7 +144,12 @@ static void send_report(const uint8_t *data, uint8_t len) {
     };
 
     int err = bt_gatt_notify_cb(conn, &notify_params);
-    raw_hid_stat_inc(err ? RAW_HID_STAT_FAILED : RAW_HID_STAT_SENT);
+    // -EINVAL: the PC hasn't turned this report's notifications on (Zephyr checks the CCC);
+    // -ENOTCONN: the link went; -EPERM: not encrypted yet. Nobody listens: skipped, not failed.
+    bool skipped = err == -EINVAL || err == -ENOTCONN || err == -EPERM;
+    raw_hid_stat_inc(!err      ? RAW_HID_STAT_BLE_SENT
+                     : skipped ? RAW_HID_STAT_BLE_SKIPPED
+                               : RAW_HID_STAT_BLE_FAILED);
     if (err == -EPERM) {
         bt_conn_set_security(conn, BT_SECURITY_L2);
     } else if (err) {

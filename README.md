@@ -81,7 +81,11 @@ ZMK_SUBSCRIPTION(process_raw_hid_event, raw_hid_received_event);
 sent over both USB and BLE counts twice), `queued` (USB reports that waited for a transfer in
 flight), `dropped` (waiting USB reports lost: the ring was full, or a USB reset or disconnect
 emptied it), `failed` (a transport refused the report) and `stuck` (USB transfers taken as lost
-after 100 ms). Code that also builds against older copies of this module can test for the header
+after 100 ms). Version 2 (`RAW_HID_STATS_VERSION`) adds each transport's own counts: `usb_sent`,
+`usb_failed`, `ble_sent`, `ble_failed` and `ble_skipped` (BLE reports nobody listens for: no link on
+the active profile, the PC hasn't turned the report's notifications on, or the link isn't
+encrypted yet; normal while the PC uses USB). `sent` and `failed` are the sums, so a skipped BLE
+report is no longer counted as failed. Code that also builds against older copies of this module can test for the header
 with `__has_include(<raw_hid/stats.h>)`.
 
 ## Thanks
