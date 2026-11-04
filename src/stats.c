@@ -5,6 +5,8 @@
 #include <zephyr/sys/atomic.h>
 
 static atomic_t counts[RAW_HID_STAT_COUNT];
+static atomic_t usb_last_err;
+static atomic_t ble_last_err;
 
 void raw_hid_stat_inc(enum raw_hid_stat s) {
     atomic_val_t v;
@@ -14,6 +16,11 @@ void raw_hid_stat_inc(enum raw_hid_stat s) {
             return; // saturates
         }
     } while (!atomic_cas(&counts[s], v, v + 1));
+}
+
+void raw_hid_stat_failed(enum raw_hid_stat s, int err) {
+    atomic_set(s == RAW_HID_STAT_BLE_FAILED ? &ble_last_err : &usb_last_err, err);
+    raw_hid_stat_inc(s);
 }
 
 void raw_hid_stat_add(enum raw_hid_stat s, uint32_t n) {
@@ -36,4 +43,6 @@ void raw_hid_stats_get(struct raw_hid_stats *out) {
     out->dropped = get(RAW_HID_STAT_DROPPED);
     out->failed = out->usb_failed + out->ble_failed;
     out->stuck = get(RAW_HID_STAT_STUCK);
+    out->usb_last_err = (int32_t)atomic_get(&usb_last_err);
+    out->ble_last_err = (int32_t)atomic_get(&ble_last_err);
 }

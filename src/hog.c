@@ -147,9 +147,11 @@ static void send_report(const uint8_t *data, uint8_t len) {
     // -EINVAL: the PC hasn't turned this report's notifications on (Zephyr checks the CCC);
     // -ENOTCONN: the link went; -EPERM: not encrypted yet. Nobody listens: skipped, not failed.
     bool skipped = err == -EINVAL || err == -ENOTCONN || err == -EPERM;
-    raw_hid_stat_inc(!err      ? RAW_HID_STAT_BLE_SENT
-                     : skipped ? RAW_HID_STAT_BLE_SKIPPED
-                               : RAW_HID_STAT_BLE_FAILED);
+    if (!err || skipped) {
+        raw_hid_stat_inc(!err ? RAW_HID_STAT_BLE_SENT : RAW_HID_STAT_BLE_SKIPPED);
+    } else {
+        raw_hid_stat_failed(RAW_HID_STAT_BLE_FAILED, err);
+    }
     if (err == -EPERM) {
         bt_conn_set_security(conn, BT_SECURITY_L2);
     } else if (err) {

@@ -85,7 +85,8 @@ after 100 ms). Version 2 (`RAW_HID_STATS_VERSION`) adds each transport's own cou
 `usb_failed`, `ble_sent`, `ble_failed` and `ble_skipped` (BLE reports nobody listens for: no link on
 the active profile, the PC hasn't turned the report's notifications on, or the link isn't
 encrypted yet; normal while the PC uses USB). `sent` and `failed` are the sums, so a skipped BLE
-report is no longer counted as failed. Code that also builds against older copies of this module can test for the header
+report is no longer counted as failed. Version 3 adds `usb_last_err` and `ble_last_err`: the
+error code of the last report that transport refused (a negative errno), 0 while it refused none. Code that also builds against older copies of this module can test for the header
 with `__has_include(<raw_hid/stats.h>)`.
 
 ## Thanks
