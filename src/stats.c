@@ -22,10 +22,18 @@ void raw_hid_stat_add(enum raw_hid_stat s, uint32_t n) {
     }
 }
 
+static uint32_t get(enum raw_hid_stat s) { return (uint32_t)atomic_get(&counts[s]); }
+
 void raw_hid_stats_get(struct raw_hid_stats *out) {
-    out->sent = (uint32_t)atomic_get(&counts[RAW_HID_STAT_SENT]);
-    out->queued = (uint32_t)atomic_get(&counts[RAW_HID_STAT_QUEUED]);
-    out->dropped = (uint32_t)atomic_get(&counts[RAW_HID_STAT_DROPPED]);
-    out->failed = (uint32_t)atomic_get(&counts[RAW_HID_STAT_FAILED]);
-    out->stuck = (uint32_t)atomic_get(&counts[RAW_HID_STAT_STUCK]);
+    out->usb_sent = get(RAW_HID_STAT_USB_SENT);
+    out->usb_failed = get(RAW_HID_STAT_USB_FAILED);
+    out->ble_sent = get(RAW_HID_STAT_BLE_SENT);
+    out->ble_failed = get(RAW_HID_STAT_BLE_FAILED);
+    out->ble_skipped = get(RAW_HID_STAT_BLE_SKIPPED);
+    // Each part saturates at 0x7fffffff, so the sums fit.
+    out->sent = out->usb_sent + out->ble_sent;
+    out->queued = get(RAW_HID_STAT_QUEUED);
+    out->dropped = get(RAW_HID_STAT_DROPPED);
+    out->failed = out->usb_failed + out->ble_failed;
+    out->stuck = get(RAW_HID_STAT_STUCK);
 }
