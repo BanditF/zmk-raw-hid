@@ -10,8 +10,9 @@
 #include <stdint.h>
 
 // Version 2 counts each transport on its own (the fields after stuck) and no longer counts a BLE
-// report nobody listens for as failed: that is skipped.
-#define RAW_HID_STATS_VERSION 2
+// report nobody listens for as failed: that is skipped. Version 3 keeps each transport's last
+// refusal's error code, so a count of failed reports can say why.
+#define RAW_HID_STATS_VERSION 3
 
 struct raw_hid_stats {
     // Reports a transport accepted: USB transfers the driver took, BLE notifications queued
@@ -36,6 +37,10 @@ struct raw_hid_stats {
     // hasn't turned the report's notifications on, or the link isn't encrypted yet. Normal while
     // the PC uses USB; not a fault.
     uint32_t ble_skipped;
+    // Version 3: the error code of the last report each transport refused (counted in usb_failed
+    // or ble_failed; a negative errno such as -ENOMEM), 0 while it refused none.
+    int32_t usb_last_err;
+    int32_t ble_last_err;
 };
 
 // Copies the counters into out. Any thread.

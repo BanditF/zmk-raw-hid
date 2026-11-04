@@ -90,9 +90,11 @@ static void write_report(const uint8_t *data, uint8_t len) {
         last = !last;
     }
     k_spin_unlock(&lock, key);
-    raw_hid_stat_inc(err ? RAW_HID_STAT_USB_FAILED : RAW_HID_STAT_USB_SENT);
     if (err) {
+        raw_hid_stat_failed(RAW_HID_STAT_USB_FAILED, err);
         LOG_ERR("Failed to send report: %i", err);
+    } else {
+        raw_hid_stat_inc(RAW_HID_STAT_USB_SENT);
     }
 }
 

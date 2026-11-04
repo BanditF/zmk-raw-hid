@@ -17,5 +17,7 @@ enum raw_hid_stat {
 };
 
 void raw_hid_stat_inc(enum raw_hid_stat s);
+// A refusal: counts usb_failed or ble_failed and keeps err as that transport's last error.
+void raw_hid_stat_failed(enum raw_hid_stat s, int err);
 // n at once (a ring emptied by a USB reset); n is at most the ring's size.
 void raw_hid_stat_add(enum raw_hid_stat s, uint32_t n);
