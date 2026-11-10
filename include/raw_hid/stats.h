@@ -12,7 +12,9 @@
 // Version 2 counts each transport on its own (the fields after stuck) and no longer counts a BLE
 // report nobody listens for as failed: that is skipped. Version 3 keeps each transport's last
 // refusal's error code, so a count of failed reports can say why.
-#define RAW_HID_STATS_VERSION 3
+// Version 4 counts the BLE reports skipped because the link's ATT MTU was still too small for
+// a report (ble_early, also in ble_skipped).
+#define RAW_HID_STATS_VERSION 4
 
 struct raw_hid_stats {
     // Reports a transport accepted: USB transfers the driver took, BLE notifications queued
@@ -41,6 +43,11 @@ struct raw_hid_stats {
     // or ble_failed; a negative errno such as -ENOMEM), 0 while it refused none.
     int32_t usb_last_err;
     int32_t ble_last_err;
+    // Version 4: BLE reports skipped because the link's ATT MTU was still below the report
+    // (23 until the PC's MTU exchange right after a connect; a bonded PC's CCC is back at once,
+    // so the notify got past the CCC check and Zephyr refused it with -ENOMEM, foxglove#942).
+    // Counted in ble_skipped too.
+    uint32_t ble_early;
 };
 
 // Copies the counters into out. Any thread.

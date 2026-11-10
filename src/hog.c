@@ -132,6 +132,17 @@ static void send_report(const uint8_t *data, uint8_t len) {
         return;
     }
 
+    // A notification is the 3-byte ATT header plus the whole report. Until the PC's MTU exchange
+    // the MTU is 23, Zephyr has no ATT channel for it and refuses with -ENOMEM (foxglove#942,
+    // every connect). Nobody can listen yet: skipped and counted, no error.
+    if (bt_gatt_get_mtu(conn) < CONFIG_RAW_HID_REPORT_SIZE + 3) {
+        raw_hid_stat_inc(RAW_HID_STAT_BLE_SKIPPED);
+        raw_hid_stat_inc(RAW_HID_STAT_BLE_EARLY);
+        LOG_DBG("BT - MTU %u too small for a report yet, skipped", bt_gatt_get_mtu(conn));
+        bt_conn_unref(conn);
+        return;
+    }
+
     LOG_INF("BT - Sending Raw HID report of length %i", len);
     uint8_t report[CONFIG_RAW_HID_REPORT_SIZE] = {0};
     memcpy(report, data, len);

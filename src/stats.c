@@ -37,6 +37,7 @@ void raw_hid_stats_get(struct raw_hid_stats *out) {
     out->ble_sent = get(RAW_HID_STAT_BLE_SENT);
     out->ble_failed = get(RAW_HID_STAT_BLE_FAILED);
     out->ble_skipped = get(RAW_HID_STAT_BLE_SKIPPED);
+    out->ble_early = get(RAW_HID_STAT_BLE_EARLY);
     // Each part saturates at 0x7fffffff, so the sums fit.
     out->sent = out->usb_sent + out->ble_sent;
     out->queued = get(RAW_HID_STAT_QUEUED);
